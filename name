@@ -1,172 +1,329 @@
--- // СКРИПТ ДЛЯ COUNTER BLOX С GUI, AIMBOT, WALLHACK, BHOP, TRIGGERBOT // --
-
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 
--- // Глобальные настройки
-getgenv().WallhackEnabled = false
-getgenv().AimbotEnabled = false
-getgenv().BhopEnabled = false
-getgenv().ThirdPersonEnabled = false
-getgenv().TriggerbotEnabled = false
-getgenv().SkinChangerEnabled = false
-getgenv().TriggerbotDelay = 0.05 -- по умолчанию 50 мс
-getgenv().HeadHitboxSize = 5 -- начальный размер хитбокса головы
+-- Настройки (все функции выключены по умолчанию)
+getgenv().Settings = {
+    Aimbot = {
+        Enabled = false,
+        Key = Enum.UserInputType.MouseButton2,
+        Smoothing = 0.25,
+        FOV = 150,
+        VisibleCheck = true,
+        AimPart = "Head"
+    },
+    Visuals = {
+        ESP = {
+            Enabled = false, -- Выключено по умолчанию
+            TeamCheck = true,
+            HealthBasedColors = true,
+            FullHealthColor = Color3.fromRGB(0, 255, 0),
+            LowHealthColor = Color3.fromRGB(255, 0, 0),
+            OutlineColor = Color3.new(1, 1, 1)
+        },
+        Tracers = {
+            Enabled = false, -- Выключено по умолчанию
+            Color = Color3.fromRGB(255, 50, 50),
+            Duration = 0.8,
+            Thickness = 0.1,
+            Texture = "rbxassetid://446111271"
+        },
+        BulletImpacts = {
+            Enabled = false, -- Выключено по умолчанию
+            Color = Color3.fromRGB(255, 100, 0),
+            Duration = 2
+        }
+    },
+    BHop = {
+        Enabled = false, -- Выключено по умолчанию
+        Speed = 1.25
+    },
+    Triggerbot = {
+        Enabled = false, -- Выключено по умолчанию
+        Range = 1000,
+        Delay = 0.5, -- Увеличена максимальная задержка до 5 сек
+        LogShots = true,
+        LogDuration = 5,
+        MaxLogs = 8
+    },
+    NoRecoil = {
+        Enabled = false -- Выключено по умолчанию
+    },
+    ThirdPerson = {
+        Enabled = false, -- Выключено по умолчанию
+        Distance = 6,
+        Height = 2
+    }
+}
 
-
--- // Переменные
+-- Переменные
 local RightMouseDown = false
--- Отслеживание ПКМ для активации Aimbot
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if input.UserInputType == Enum.UserInputType.MouseButton2 then
-		RightMouseDown = true
-	end
-end)
+local connections = {}
+local espCache = {}
+local aimbotTarget = nil
+local camRotX, camRotY = 0, 0
+local espLastUpdate = 0
+local espUpdateInterval = 0.3
+local mouse = LocalPlayer:GetMouse()
+local lastShotTime = 0
+local shotCooldown = 0.2
+local originalSpreadValues = {}
+local recoilConnections = {}
 
-UserInputService.InputEnded:Connect(function(input, gameProcessed)
-	if input.UserInputType == Enum.UserInputType.MouseButton2 then
-		RightMouseDown = false
-	end
-end)
+-- GUI для логов выстрелов
+local logGui = Instance.new("ScreenGui")
+logGui.Name = "ShotLogsGui"
+logGui.Parent = CoreGui
+logGui.ResetOnSpawn = false
+logGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-local bhopConnection = nil
-local thirdPersonConn = nil
+-- Таблица активных логов
+local activeLogs = {}
 
---// Wallhack Script with Healthbar //
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
-
-getgenv().WallhackEnabled = false
-
-local function isEnemy(plr)
-    if plr.Team ~= nil and LocalPlayer.Team ~= nil then
-        return plr.Team ~= LocalPlayer.Team
+-- Функция создания лога выстрела
+local function LogTriggerShot(targetPlayer, hitPart, distance)
+    if not getgenv().Settings.Triggerbot.LogShots then return end
+    if not targetPlayer or not hitPart then return end
+    
+    local currentTime = os.clock()
+    if currentTime - lastShotTime < shotCooldown then return end
+    lastShotTime = currentTime
+    
+    if #activeLogs >= getgenv().Settings.Triggerbot.MaxLogs then
+        activeLogs[1]:Destroy()
+        table.remove(activeLogs, 1)
     end
-    return true
+    
+    for i, log in ipairs(activeLogs) do
+        log.Position = UDim2.new(0.8, 0, 0.7 + (i-1) * 0.05, 0)
+    end
+    
+    local hitPartName
+    if hitPart.Name == "Head" then
+        hitPartName = "Голова"
+    elseif hitPart.Name == "HumanoidRootPart" then
+        hitPartName = "Торс"
+    elseif hitPart.Name:find("Arm") or hitPart.Name:find("Hand") then
+        hitPartName = "Рука"
+    elseif hitPart.Name:find("Leg") or hitPart.Name:find("Foot") then
+        hitPartName = "Нога"
+    else
+        hitPartName = "Тело"
+    end
+    
+    local distanceText = string.format("%.0f studs", distance)
+    local message = string.format("→ %s [%s] (%s)", targetPlayer.Name, hitPartName, distanceText)
+    
+    local logLabel = Instance.new("TextLabel")
+    logLabel.Text = message
+    logLabel.Font = Enum.Font.GothamBold
+    logLabel.TextSize = 18
+    logLabel.TextColor3 = Color3.new(1, 0.3, 0.3)
+    logLabel.TextStrokeTransparency = 0.5
+    logLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    logLabel.BackgroundTransparency = 1
+    logLabel.Size = UDim2.new(0.2, 0, 0.05, 0)
+    logLabel.Position = UDim2.new(0.8, 0, 0.7 + (#activeLogs * 0.05), 0)
+    logLabel.TextXAlignment = Enum.TextXAlignment.Right
+    logLabel.Parent = logGui
+    
+    logLabel.TextTransparency = 1
+    local tweenIn = TweenService:Create(
+        logLabel,
+        TweenInfo.new(0.3),
+        {TextTransparency = 0}
+    )
+    tweenIn:Play()
+    
+    table.insert(activeLogs, logLabel)
+    
+    task.delay(getgenv().Settings.Triggerbot.LogDuration, function()
+        if logLabel and logLabel.Parent then
+            local tweenOut = TweenService:Create(
+                logLabel,
+                TweenInfo.new(0.5),
+                {TextTransparency = 1}
+            )
+            tweenOut:Play()
+            
+            tweenOut.Completed:Wait()
+            if logLabel and logLabel.Parent then
+                logLabel:Destroy()
+                for i, log in ipairs(activeLogs) do
+                    if log == logLabel then
+                        table.remove(activeLogs, i)
+                        break
+                    end
+                end
+                
+                for i, log in ipairs(activeLogs) do
+                    log.Position = UDim2.new(0.8, 0, 0.7 + (i-1) * 0.05, 0)
+                end
+            end
+        end
+    end)
 end
 
-local function clearHighlights()
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr.Character then
-            local highlight = plr.Character:FindFirstChild("WH_Highlight")
-            if highlight then
-                highlight:Destroy()
+-- ESP с улучшенной обработкой ошибок
+local function CreateESP(player)
+    if espCache[player] then return end
+    
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESP_"..player.Name
+    highlight.OutlineColor = getgenv().Settings.Visuals.ESP.OutlineColor
+    highlight.FillTransparency = 0.5
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = CoreGui
+    
+    espCache[player] = {
+        Highlight = highlight,
+        LastUpdate = os.clock(),
+        HealthConnection = nil
+    }
+    
+    local function updateHealthColor(humanoid)
+        if not getgenv().Settings.Visuals.ESP.HealthBasedColors then
+            highlight.FillColor = getgenv().Settings.Visuals.ESP.FullHealthColor
+            return
+        end
+        
+        local health = humanoid.Health
+        local maxHealth = humanoid.MaxHealth
+        local healthPercent = health / maxHealth
+        
+        local r = 1 - healthPercent
+        local g = healthPercent
+        local b = 0
+        highlight.FillColor = Color3.new(r, g, b)
+    end
+
+    local function SetupHealthListener(character)
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            if espCache[player].HealthConnection then
+                espCache[player].HealthConnection:Disconnect()
             end
-            local head = plr.Character:FindFirstChild("HumanoidRootPart")
-            if head then
-                local gui = head:FindFirstChild("WH_HealthGui")
-                if gui then gui:Destroy() end
+            
+            espCache[player].HealthConnection = humanoid:GetPropertyChangedSignal("Health"):Connect(function()
+                updateHealthColor(humanoid)
+            end)
+            
+            updateHealthColor(humanoid)
+        end
+    end
+
+    if player.Character then
+        highlight.Adornee = player.Character
+        SetupHealthListener(player.Character)
+    end
+    
+    player.CharacterAdded:Connect(function(character)
+        highlight.Adornee = character
+        task.wait(1)
+        SetupHealthListener(character)
+    end)
+end
+
+local function SafeUpdateESP()
+    if not getgenv().Settings.Visuals.ESP.Enabled then 
+        for player, data in pairs(espCache) do
+            if data.Highlight then
+                pcall(function() data.Highlight:Destroy() end)
             end
-            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local light = hrp:FindFirstChild("WH_Light")
-                if light then light:Destroy() end
+            if data.HealthConnection then
+                pcall(function() data.HealthConnection:Disconnect() end)
+            end
+        end
+        espCache = {}
+        return
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local success, err = pcall(function()
+                local isEnemy = true
+                if getgenv().Settings.Visuals.ESP.TeamCheck and player.Team == LocalPlayer.Team then
+                    isEnemy = false
+                end
+                
+                if isEnemy then
+                    if not espCache[player] then
+                        CreateESP(player)
+                    end
+                    
+                    if espCache[player] then
+                        local char = player.Character
+                        espCache[player].Highlight.Enabled = char and true or false
+                    end
+                else
+                    if espCache[player] then
+                        espCache[player].Highlight.Enabled = false
+                    end
+                end
+            end)
+            
+            if not success then
+                warn("ESP Update Error for", player.Name, ":", err)
             end
         end
     end
 end
 
-local function createHealthDisplay(char)
-    local head = char:FindFirstChild("Head")
-    if not head then return end
-
-    if head:FindFirstChild("WH_HealthGui") then return end
-
-    local billboard = Instance.new("BillboardGui")
-    billboard.Name = "WH_HealthGui"
-    billboard.Adornee = head
-    billboard.StudsOffset = Vector3.new(3, 0, 0)
-    billboard.Size = UDim2.new(4, 0, 0.5, 0)
-    billboard.AlwaysOnTop = true
-    billboard.Parent = head
-
-    local barBackground = Instance.new("Frame")
-    barBackground.Size = UDim2.new(1, 0, 0.3, 0)
-    barBackground.Position = UDim2.new(0, 0, 0.35, 0)
-    barBackground.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    barBackground.BorderSizePixel = 1
-    barBackground.BorderColor3 = Color3.fromRGB(255, 255, 255)
-    barBackground.Parent = billboard
-
-    local healthBar = Instance.new("Frame")
-    healthBar.Name = "HPFill"
-    healthBar.Size = UDim2.new(1, 0, 1, 0)
-    healthBar.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
-    healthBar.BorderSizePixel = 0
-    healthBar.Parent = barBackground
-
-    local uicorner = Instance.new("UICorner")
-    uicorner.CornerRadius = UDim.new(0, 4)
-    uicorner.Parent = barBackground
-end
-
-local function createHighlight(char)
-    if not char:FindFirstChild("WH_Highlight") then
-        local hl = Instance.new("Highlight")
-        hl.Name = "WH_Highlight"
-        hl.FillColor = Color3.new(1, 0, 0)
-        hl.OutlineColor = Color3.new(1, 1, 1)
-        hl.FillTransparency = 0.25
-        hl.OutlineTransparency = 0
-        hl.Adornee = char
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Parent = char
-    end
-
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if hrp and not hrp:FindFirstChild("WH_Light") then
-        local light = Instance.new("PointLight")
-        light.Name = "WH_Light"
-        light.Color = Color3.new(1, 0, 0)
-        light.Brightness = 5
-        light.Range = 15
-        light.Shadows = true
-        light.Parent = hrp
+local function UpdateESP()
+    local success, err = pcall(SafeUpdateESP)
+    if not success then
+        warn("ESP Error:", err)
     end
 end
 
-local function updateWallhack()
-    clearHighlights()
-    if not getgenv().WallhackEnabled then return end
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr.Character and isEnemy(plr) then
-            createHighlight(plr.Character)
-            createHealthDisplay(plr.Character)
-        end
-    end
-end
+-- Исправленный Aimbot
+local function GetClosestPlayer()
+    local closestPlayer = nil
+    local shortestDistance = getgenv().Settings.Aimbot.FOV
+    local cameraPosition = Camera.CFrame.Position
 
-RunService.RenderStepped:Connect(function()
-    if getgenv().WallhackEnabled then
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr.Character and isEnemy(plr) then
-                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-                local head = plr.Character:FindFirstChild("Head")
-                if hum and head then
-                    local hpGui = head:FindFirstChild("WH_HealthGui")
-                    if hpGui then
-                        local barBackground = hpGui:FindFirstChildOfClass("Frame")
-                        if barBackground then
-                            local hpBar = barBackground:FindFirstChild("HPFill")
-                            if hpBar then
-                                local targetScale = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-local currentScale = hpBar.Size.X.Scale
-local newScale = currentScale + (targetScale - currentScale) * 0.15
-hpBar.Size = UDim2.new(newScale, 0, 1, 0)
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local character = player.Character
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local aimPart = character:FindFirstChild(getgenv().Settings.Aimbot.AimPart) or character:FindFirstChild("HumanoidRootPart")
 
-                                if hum.Health / hum.MaxHealth < 0.3 then
-                                    hpBar.BackgroundColor3 = Color3.fromRGB(255, 85, 81)
-                                elseif hum.Health / hum.MaxHealth < 0.6 then
-                                    hpBar.BackgroundColor3 = Color3.fromRGB(255, 155, 75)
-                                else
-                                hpBar.BackgroundColor3 = Color3.fromRGB(106, 255, 89) -- красивый зелёный (#32FF79)
+            if aimPart and humanoid and humanoid.Health > 0 then
+                local isEnemy = true
+                if getgenv().Settings.Visuals.ESP.TeamCheck and player.Team == LocalPlayer.Team then
+                    isEnemy = false
+                end
+
+                if isEnemy then
+                    local screenPoint, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    if onScreen then
+                        local distance = (Vector2.new(screenPoint.X, screenPoint.Y) - Vector2.new(mouse.X, mouse.Y)).Magnitude
+                        if distance < shortestDistance then
+                            if getgenv().Settings.Aimbot.VisibleCheck then
+                                local raycastParams = RaycastParams.new()
+                                raycastParams.FilterDescendantsInstances = {Camera, LocalPlayer.Character}
+                                raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+                                raycastParams.IgnoreWater = true
+                                
+                                local rayResult = workspace:Raycast(
+                                    cameraPosition,
+                                    (aimPart.Position - cameraPosition).Unit * 1000,
+                                    raycastParams
+                                )
+                                
+                                if rayResult and rayResult.Instance:FindFirstAncestor(player.Name) then
+                                    closestPlayer = player
+                                    shortestDistance = distance
                                 end
+                            else
+                                closestPlayer = player
+                                shortestDistance = distance
                             end
                         end
                     end
@@ -174,394 +331,648 @@ hpBar.Size = UDim2.new(newScale, 0, 1, 0)
             end
         end
     end
-end)
 
-local function setupCharacterTracking(plr)
-    plr.CharacterAdded:Connect(function()
-        task.wait(0.5)
-        updateWallhack()
-    end)
+    return closestPlayer
 end
 
-Players.PlayerAdded:Connect(setupCharacterTracking)
-
-for _, plr in pairs(Players:GetPlayers()) do
-    setupCharacterTracking(plr)
+local function AimAt(target)
+    if not target or not target.Character then return end
+    
+    local aimPart = target.Character:FindFirstChild(getgenv().Settings.Aimbot.AimPart) or target.Character:FindFirstChild("HumanoidRootPart")
+    if not aimPart then return end
+    
+    local targetPosition = aimPart.Position
+    local cameraPosition = Camera.CFrame.Position
+    local direction = (targetPosition - cameraPosition).Unit
+    
+    local currentLook = Camera.CFrame.LookVector
+    local goalLook = direction
+    local smoothedLook = currentLook:Lerp(goalLook, getgenv().Settings.Aimbot.Smoothing)
+    
+    Camera.CFrame = CFrame.new(cameraPosition, cameraPosition + smoothedLook)
 end
 
-LocalPlayer:GetPropertyChangedSignal("Team"):Connect(updateWallhack)
+-- Bunny Hop
+local function BHop()
+    if not getgenv().Settings.BHop.Enabled then return end
 
-updateWallhack()
+    local character = LocalPlayer.Character
+    if not character then return end
 
--- Автоматическое обновление Wallhack каждые 3 секунды
-task.spawn(function()
-    while true do
-        if getgenv().WallhackEnabled then
-            updateWallhack()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    if humanoid:GetState() == Enum.HumanoidStateType.Running and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+        humanoid.Jump = true
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
+        if rootPart then
+            local currentVelocity = rootPart.Velocity
+            rootPart.Velocity = Vector3.new(
+                currentVelocity.X * getgenv().Settings.BHop.Speed,
+                currentVelocity.Y,
+                currentVelocity.Z * getgenv().Settings.BHop.Speed
+            )
         end
-        task.wait(2)
     end
-end)
+end
 
+-- Triggerbot с защитой от ошибок
+local function Triggerbot()
+    if not getgenv().Settings.Triggerbot.Enabled then return end
+    if not LocalPlayer.Character then return end
 
+    local success, err = pcall(function()
+        local raycastParams = RaycastParams.new()
+        raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+        raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
+        raycastParams.IgnoreWater = true
 
--- // Aimbot
-RunService.RenderStepped:Connect(function()
-    if not getgenv().AimbotEnabled or not RightMouseDown then return end
-    local bestTarget = nil
-    local lowestDist = math.huge
-    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        local rayResult = workspace:Raycast(
+            Camera.CFrame.Position,
+            Camera.CFrame.LookVector * getgenv().Settings.Triggerbot.Range,
+            raycastParams
+        )
 
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr.Character and isEnemy(plr) then
-            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-                if onScreen then
-                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
-                    if dist < lowestDist then
-                        lowestDist = dist
-                        bestTarget = hrp.Position
+        if rayResult then
+            local hitPart = rayResult.Instance
+            local character = hitPart:FindFirstAncestorOfClass("Model")
+            if character then
+                local player = Players:GetPlayerFromCharacter(character)
+                if player and player ~= LocalPlayer then
+                    if getgenv().Settings.Visuals.ESP.TeamCheck and player.Team == LocalPlayer.Team then
+                        return
+                    end
+                    
+                    local distance = (hitPart.Position - Camera.CFrame.Position).Magnitude
+                    LogTriggerShot(player, hitPart, distance)
+                    
+                    mouse1press()
+                    task.wait(getgenv().Settings.Triggerbot.Delay)
+                    mouse1release()
+                end
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Triggerbot Error:", err)
+    end
+end
+
+-- No Recoil с исправлениями
+local function ApplyNoRecoil()
+    for _, conn in ipairs(recoilConnections) do
+        conn:Disconnect()
+    end
+    recoilConnections = {}
+    
+    local weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons")
+    if not weaponsFolder then return end
+    
+    local function processWeapon(weapon)
+        if not weapon:IsDescendantOf(workspace) then return end
+        
+        local spreadFolder = weapon:FindFirstChild("Spread")
+        if spreadFolder then
+            for _, value in pairs(spreadFolder:GetChildren()) do
+                if value:IsA("NumberValue") then
+                    if not originalSpreadValues[value] then
+                        originalSpreadValues[value] = value.Value
+                    end
+                    
+                    if getgenv().Settings.NoRecoil.Enabled then
+                        value.Value = 0
+                    else
+                        value.Value = originalSpreadValues[value]
                     end
                 end
             end
         end
     end
-
-    if bestTarget then
-        Camera.CFrame = CFrame.new(Camera.CFrame.Position, bestTarget)
+    
+    for _, weapon in pairs(weaponsFolder:GetChildren()) do
+        processWeapon(weapon)
     end
-end)
-
--- // Triggerbot (точный и с повторной проверкой)
-local indicatorText = indicatorText -- переиспользуем существующий
-local targetHeldFrames = 0
-local requiredFrames = 4  -- кол-во кадров, сколько цель должна быть под прицелом
-
-RunService.RenderStepped:Connect(function()
-	if not getgenv().TriggerbotEnabled then
-		targetHeldFrames = 0
-		return
-	end
-
-	local ray = Camera:ViewportPointToRay(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-	rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
-	rayParams.IgnoreWater = true
-
-	local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, rayParams)
-
-	if result and result.Instance then
-		local part = result.Instance
-		local character = part:FindFirstAncestorOfClass("Model")
-		local player = character and Players:GetPlayerFromCharacter(character)
-
-		if player and isEnemy(player) and character:FindFirstChild("Humanoid") and character:FindFirstChild("Head") then
-			targetHeldFrames += 1
-			if targetHeldFrames >= requiredFrames then
-				if indicatorText then
-					indicatorText.Text = "TRIGGERED!"
-				end
-				mouse1press()
-				task.wait(getgenv().TriggerbotDelay)
-				mouse1release()
-				task.delay(0.2, function()
-					if indicatorText then
-						indicatorText.Text = ""
-					end
-				end)
-				targetHeldFrames = 0
-			end
-		else
-			targetHeldFrames = 0
-		end
-	else
-		targetHeldFrames = 0
-	end
-end)
-
-
--- // BunnyHop
-local function toggleBhop(state)
-    if bhopConnection then
-        bhopConnection:Disconnect()
-        bhopConnection = nil
-    end
-
-    if state then
-        bhopConnection = RunService.RenderStepped:Connect(function()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if not hum then return end
-            if hum:GetState() == Enum.HumanoidStateType.Running and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-                hum.Jump = true
-            end
-        end)
+    
+    if getgenv().Settings.NoRecoil.Enabled then
+        table.insert(recoilConnections, weaponsFolder.ChildAdded:Connect(processWeapon))
     end
 end
 
--- // Third Person (исправлено с управлением камерой)
-local camDistance = 6
-local camHeight = 2
-local camSensitivity = 0.3
-local camRotX, camRotY = 0, 0
-local renderConn, inputConn
-
-local function toggleThirdPerson(state)
-    if renderConn then renderConn:Disconnect() end
-    if inputConn then inputConn:Disconnect() end
-
-    local char = LocalPlayer.Character
-    if not char then return end
-
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-
-    if not state then
+-- Third Person View
+local function UpdateThirdPerson()
+    if not getgenv().Settings.ThirdPerson.Enabled then
         Camera.CameraType = Enum.CameraType.Custom
-        Camera.CameraSubject = humanoid
+        if LocalPlayer.Character then
+            local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                Camera.CameraSubject = humanoid
+            end
+        end
         return
     end
 
-    Camera.CameraType = Enum.CameraType.Custom
-    Camera.CameraSubject = humanoid
+    local character = LocalPlayer.Character
+    if not character then return end
 
-    inputConn = UserInputService.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            camRotY = camRotY - input.Delta.X * camSensitivity
-            camRotX = math.clamp(camRotX - input.Delta.Y * camSensitivity, -80, 80)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+
+    local startPos = rootPart.Position + Vector3.new(0, getgenv().Settings.ThirdPerson.Height, 0)
+    local offset = CFrame.Angles(0, math.rad(camRotY), 0) * CFrame.Angles(math.rad(camRotX), 0, 0)
+    local camPos = startPos - offset.LookVector * getgenv().Settings.ThirdPerson.Distance
+
+    Camera.CFrame = CFrame.new(camPos, startPos)
+    Camera.CameraType = Enum.CameraType.Scriptable
+end
+
+-- GUI
+local function CreateGUI()
+    if CoreGui:FindFirstChild("CBX_GUI") then
+        CoreGui:FindFirstChild("CBX_GUI"):Destroy()
+    end
+
+    local ScreenGui = Instance.new("ScreenGui", CoreGui)
+    ScreenGui.Name = "CBX_GUI"
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.ResetOnSpawn = false
+
+    local mainFrame = Instance.new("Frame", ScreenGui)
+    mainFrame.Size = UDim2.new(0, 320, 0, 480)
+    mainFrame.Position = UDim2.new(0.5, -160, 0.5, -240)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+
+    local corner = Instance.new("UICorner", mainFrame)
+    corner.CornerRadius = UDim.new(0, 8)
+
+    local stroke = Instance.new("UIStroke", mainFrame)
+    stroke.Color = Color3.fromRGB(80, 80, 100)
+    stroke.Thickness = 1
+
+    local title = Instance.new("TextLabel", mainFrame)
+    title.Text = "COUNTER BLOX SCRIPT v6.1"
+    title.Font = Enum.Font.GothamBold
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.TextSize = 18
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0, 0, 0, 5)
+
+    -- Создаем вкладки
+    local tabButtonsFrame = Instance.new("Frame", mainFrame)
+    tabButtonsFrame.Size = UDim2.new(1, 0, 0, 30)
+    tabButtonsFrame.Position = UDim2.new(0, 0, 0, 35)
+    tabButtonsFrame.BackgroundTransparency = 1
+
+    local tabsFolder = Instance.new("Folder", mainFrame)
+    tabsFolder.Name = "Tabs"
+
+    local function CreateTab(name, position)
+        local tabButton = Instance.new("TextButton", tabButtonsFrame)
+        tabButton.Text = name
+        tabButton.Font = Enum.Font.GothamBold
+        tabButton.TextSize = 14
+        tabButton.Size = UDim2.new(0.33, -2, 1, 0)
+        tabButton.Position = position
+        tabButton.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        tabButton.TextColor3 = Color3.new(1, 1, 1)
+        
+        local corner = Instance.new("UICorner", tabButton)
+        corner.CornerRadius = UDim.new(0, 4)
+        
+        local tabFrame = Instance.new("ScrollingFrame", tabsFolder)
+        tabFrame.Name = name.."Tab"
+        tabFrame.Size = UDim2.new(1, -10, 1, -100)
+        tabFrame.Position = UDim2.new(0, 5, 0, 70)
+        tabFrame.BackgroundTransparency = 1
+        tabFrame.CanvasSize = UDim2.new(0, 0, 0, 800)
+        tabFrame.ScrollBarThickness = 5
+        tabFrame.Visible = false
+        
+        local contentLayout = Instance.new("UIListLayout", tabFrame)
+        contentLayout.Padding = UDim.new(0, 8)
+        contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        
+        tabButton.MouseButton1Click:Connect(function()
+            for _, tab in ipairs(tabsFolder:GetChildren()) do
+                tab.Visible = false
+            end
+            tabFrame.Visible = true
+            
+            for _, btn in ipairs(tabButtonsFrame:GetChildren()) do
+                if btn:IsA("TextButton") then
+                    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+                end
+            end
+            tabButton.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+        end)
+        
+        return tabFrame
+    end
+
+    -- Создаем вкладки
+    local aimTab = CreateTab("Aimbot", UDim2.new(0, 0, 0, 0))
+    local visualsTab = CreateTab("Visuals", UDim2.new(0.33, 0, 0, 0))
+    local miscTab = CreateTab("Misc", UDim2.new(0.66, 0, 0, 0))
+    
+    -- Активируем первую вкладку по умолчанию
+    aimTab.Visible = true
+    tabButtonsFrame:GetChildren()[1].BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+
+    local function CreateToggle(name, settingPath, callback, parent)
+        local frame = Instance.new("Frame", parent)
+        frame.Size = UDim2.new(0.95, 0, 0, 30)
+        frame.BackgroundTransparency = 1
+        
+        local label = Instance.new("TextLabel", frame)
+        label.Text = name
+        label.Font = Enum.Font.Gotham
+        label.TextColor3 = Color3.new(1, 1, 1)
+        label.TextSize = 14
+        label.Size = UDim2.new(0.7, 0, 1, 0)
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.BackgroundTransparency = 1
+        
+        local button = Instance.new("TextButton", frame)
+        button.Size = UDim2.new(0.25, 0, 0.7, 0)
+        button.Position = UDim2.new(0.75, 0, 0.15, 0)
+        button.Text = getgenv().Settings[settingPath[1]][settingPath[2]] and "ON" or "OFF"
+        button.BackgroundColor3 = getgenv().Settings[settingPath[1]][settingPath[2]] and Color3.fromRGB(0, 170, 0) or Color3.fromRGB(170, 0, 0)
+        button.Font = Enum.Font.GothamBold
+        button.TextSize = 14
+        
+        local corner = Instance.new("UICorner", button)
+        corner.CornerRadius = UDim.new(0, 4)
+        
+        button.MouseButton1Click:Connect(function()
+            getgenv().Settings[settingPath[1]][settingPath[2]] = not getgenv().Settings[settingPath[1]][settingPath[2]]
+            button.Text = getgenv().Settings[settingPath[1]][settingPath[2]] and "ON" or "OFF"
+            button.BackgroundColor3 = getgenv().Settings[settingPath[1]][settingPath[2]] and Color3.fromRGB(0, 170, 0) or Color3.fromRGB(170, 0, 0)
+            if callback then callback() end
+        end)
+        
+        return frame
+    end
+
+    -- Вкладка Aimbot
+    CreateToggle("Aimbot", {"Aimbot", "Enabled"}, nil, aimTab)
+    CreateToggle("Visible Check", {"Aimbot", "VisibleCheck"}, nil, aimTab)
+    
+    -- Выбор части тела для аима
+    local aimPartFrame = Instance.new("Frame", aimTab)
+    aimPartFrame.Size = UDim2.new(0.95, 0, 0, 30)
+    aimPartFrame.BackgroundTransparency = 1
+    
+    local label = Instance.new("TextLabel", aimPartFrame)
+    label.Text = "Aim Part: "..getgenv().Settings.Aimbot.AimPart
+    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 14
+    label.Size = UDim2.new(0.7, 0, 1, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.BackgroundTransparency = 1
+    
+    local button = Instance.new("TextButton", aimPartFrame)
+    button.Size = UDim2.new(0.25, 0, 0.7, 0)
+    button.Position = UDim2.new(0.75, 0, 0.15, 0)
+    button.Text = "Change"
+    button.BackgroundColor3 = Color3.fromRGB(80, 80, 180)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 14
+    
+    local corner = Instance.new("UICorner", button)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    button.MouseButton1Click:Connect(function()
+        if getgenv().Settings.Aimbot.AimPart == "Head" then
+            getgenv().Settings.Aimbot.AimPart = "HumanoidRootPart"
+        else
+            getgenv().Settings.Aimbot.AimPart = "Head"
+        end
+        label.Text = "Aim Part: "..getgenv().Settings.Aimbot.AimPart
+    end)
+
+    -- Настройка FOV Aimbot
+    local fovSliderFrame = Instance.new("Frame", aimTab)
+    fovSliderFrame.Size = UDim2.new(0.95, 0, 0, 40)
+    fovSliderFrame.BackgroundTransparency = 1
+    
+    local label = Instance.new("TextLabel", fovSliderFrame)
+    label.Text = "Aimbot FOV: " .. getgenv().Settings.Aimbot.FOV
+    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 14
+    label.Size = UDim2.new(1, 0, 0.5, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.BackgroundTransparency = 1
+    
+    local slider = Instance.new("Frame", fovSliderFrame)
+    slider.Size = UDim2.new(1, 0, 0.5, 0)
+    slider.Position = UDim2.new(0, 0, 0.5, 0)
+    slider.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    slider.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", slider)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    local fill = Instance.new("Frame", slider)
+    fill.Size = UDim2.new(getgenv().Settings.Aimbot.FOV / 300, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+    fill.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", fill)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local mousePos = UserInputService:GetMouseLocation().X
+            local absolutePos = slider.AbsolutePosition.X
+            local absoluteSize = slider.AbsoluteSize.X
+            local relative = math.clamp((mousePos - absolutePos) / absoluteSize, 0, 1)
+            
+            getgenv().Settings.Aimbot.FOV = math.floor(relative * 300)
+            fill.Size = UDim2.new(relative, 0, 1, 0)
+            label.Text = "Aimbot FOV: " .. getgenv().Settings.Aimbot.FOV
         end
     end)
 
-    renderConn = RunService.RenderStepped:Connect(function()
-        local root = humanoid.RootPart
-        if not root then return end
-
-        local startPos = root.Position + Vector3.new(0, camHeight, 0)
-        local offset = CFrame.Angles(0, math.rad(camRotY), 0) * CFrame.Angles(math.rad(camRotX), 0, 0)
-        local camPos = startPos - offset.LookVector * camDistance
-
-        Camera.CFrame = CFrame.new(camPos, startPos)
+    -- Вкладка Visuals
+    CreateToggle("ESP", {"Visuals", "ESP", "Enabled"}, UpdateESP, visualsTab)
+    CreateToggle("Health Colors", {"Visuals", "ESP", "HealthBasedColors"}, UpdateESP, visualsTab)
+    CreateToggle("Team Check", {"Visuals", "ESP", "TeamCheck"}, UpdateESP, visualsTab)
+    
+    -- Настройка цвета ESP
+    local espColorFrame = Instance.new("Frame", visualsTab)
+    espColorFrame.Size = UDim2.new(0.95, 0, 0, 30)
+    espColorFrame.BackgroundTransparency = 1
+    
+    local label = Instance.new("TextLabel", espColorFrame)
+    label.Text = "ESP Outline Color"
+    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 14
+    label.Size = UDim2.new(0.7, 0, 1, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.BackgroundTransparency = 1
+    
+    local button = Instance.new("TextButton", espColorFrame)
+    button.Size = UDim2.new(0.25, 0, 0.7, 0)
+    button.Position = UDim2.new(0.75, 0, 0.15, 0)
+    button.Text = "Change"
+    button.BackgroundColor3 = getgenv().Settings.Visuals.ESP.OutlineColor
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 14
+    
+    local corner = Instance.new("UICorner", button)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    button.MouseButton1Click:Connect(function()
+        getgenv().Settings.Visuals.ESP.OutlineColor = Color3.fromRGB(
+            math.random(50, 255),
+            math.random(50, 255),
+            math.random(50, 255))
+        button.BackgroundColor3 = getgenv().Settings.Visuals.ESP.OutlineColor
+        UpdateESP()
     end)
+
+    -- Вкладка Misc
+    CreateToggle("Bunny Hop", {"BHop", "Enabled"}, nil, miscTab)
+    CreateToggle("Triggerbot", {"Triggerbot", "Enabled"}, nil, miscTab)
+    CreateToggle("Log Trigger Shots", {"Triggerbot", "LogShots"}, nil, miscTab)
+    CreateToggle("No Recoil", {"NoRecoil", "Enabled"}, ApplyNoRecoil, miscTab)
+    CreateToggle("Third Person", {"ThirdPerson", "Enabled"}, nil, miscTab)
+    
+    -- Настройки Triggerbot
+    local triggerRangeFrame = Instance.new("Frame", miscTab)
+    triggerRangeFrame.Size = UDim2.new(0.95, 0, 0, 40)
+    triggerRangeFrame.BackgroundTransparency = 1
+    
+    local label = Instance.new("TextLabel", triggerRangeFrame)
+    label.Text = "Triggerbot Range: " .. getgenv().Settings.Triggerbot.Range
+    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 14
+    label.Size = UDim2.new(1, 0, 0.5, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.BackgroundTransparency = 1
+    
+    local slider = Instance.new("Frame", triggerRangeFrame)
+    slider.Size = UDim2.new(1, 0, 0.5, 0)
+    slider.Position = UDim2.new(0, 0, 0.5, 0)
+    slider.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    slider.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", slider)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    local fill = Instance.new("Frame", slider)
+    fill.Size = UDim2.new(getgenv().Settings.Triggerbot.Range / 2000, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(170, 0, 255)
+    fill.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", fill)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local mousePos = UserInputService:GetMouseLocation().X
+            local absolutePos = slider.AbsolutePosition.X
+            local absoluteSize = slider.AbsoluteSize.X
+            local relative = math.clamp((mousePos - absolutePos) / absoluteSize, 0, 1)
+            
+            getgenv().Settings.Triggerbot.Range = math.floor(relative * 2000)
+            fill.Size = UDim2.new(relative, 0, 1, 0)
+            label.Text = "Triggerbot Range: " .. getgenv().Settings.Triggerbot.Range
+        end
+    end)
+
+    local triggerDelayFrame = Instance.new("Frame", miscTab)
+    triggerDelayFrame.Size = UDim2.new(0.95, 0, 0, 40)
+    triggerDelayFrame.BackgroundTransparency = 1
+    
+    local label = Instance.new("TextLabel", triggerDelayFrame)
+    label.Text = "Triggerbot Delay: " .. string.format("%.2f", getgenv().Settings.Triggerbot.Delay) .. "s"
+    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 14
+    label.Size = UDim2.new(1, 0, 0.5, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.BackgroundTransparency = 1
+    
+    local slider = Instance.new("Frame", triggerDelayFrame)
+    slider.Size = UDim2.new(1, 0, 0.5, 0)
+    slider.Position = UDim2.new(0, 0, 0.5, 0)
+    slider.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    slider.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", slider)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    local fill = Instance.new("Frame", slider)
+    fill.Size = UDim2.new(getgenv().Settings.Triggerbot.Delay / 5, 0, 1, 0)  -- Максимальная задержка 5 секунд
+    fill.BackgroundColor3 = Color3.fromRGB(255, 100, 0)
+    fill.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner", fill)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local mousePos = UserInputService:GetMouseLocation().X
+            local absolutePos = slider.AbsolutePosition.X
+            local absoluteSize = slider.AbsoluteSize.X
+            local relative = math.clamp((mousePos - absolutePos) / absoluteSize, 0, 1)
+            
+            getgenv().Settings.Triggerbot.Delay = relative * 5  -- Увеличено до 5 секунд
+            fill.Size = UDim2.new(relative, 0, 1, 0)
+            label.Text = "Triggerbot Delay: " .. string.format("%.2f", getgenv().Settings.Triggerbot.Delay) .. "s"
+        end
+    end)
+
+    -- Кнопки управления
+    local buttonFrame = Instance.new("Frame", mainFrame)
+    buttonFrame.Size = UDim2.new(1, 0, 0, 40)
+    buttonFrame.Position = UDim2.new(0, 0, 1, -40)
+    buttonFrame.BackgroundTransparency = 1
+    
+    local espToggleBtn = Instance.new("TextButton", buttonFrame)
+    espToggleBtn.Text = "Toggle ESP"
+    espToggleBtn.Font = Enum.Font.GothamBold
+    espToggleBtn.TextSize = 14
+    espToggleBtn.Size = UDim2.new(0.4, 0, 0.8, 0)
+    espToggleBtn.Position = UDim2.new(0.05, 0, 0.1, 0)
+    espToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 180)
+    
+    local corner = Instance.new("UICorner", espToggleBtn)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    espToggleBtn.MouseButton1Click:Connect(function()
+        getgenv().Settings.Visuals.ESP.Enabled = not getgenv().Settings.Visuals.ESP.Enabled
+        UpdateESP()
+    end)
+    
+    local closeBtn = Instance.new("TextButton", buttonFrame)
+    closeBtn.Text = "Close"
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 14
+    closeBtn.Size = UDim2.new(0.4, 0, 0.8, 0)
+    closeBtn.Position = UDim2.new(0.55, 0, 0.1, 0)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    
+    local corner = Instance.new("UICorner", closeBtn)
+    corner.CornerRadius = UDim.new(0, 4)
+    
+    closeBtn.MouseButton1Click:Connect(function()
+        ScreenGui.Enabled = not ScreenGui.Enabled
+    end)
+    
+    -- Горячая клавиша
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if not processed and input.KeyCode == Enum.KeyCode.RightControl then
+            ScreenGui.Enabled = not ScreenGui.Enabled
+        end
+    end)
+    
+    return ScreenGui
 end
--- // GUI ИНТЕРФЕЙС
-local ScreenGui = Instance.new("ScreenGui", game.CoreGui)
-ScreenGui.Name = "CBX_CustomGUI"
 
-local frame = Instance.new("Frame", ScreenGui)
-frame.Size = UDim2.new(0, 400, 0, 600)
-frame.Position = UDim2.new(0, 100, 0.5, -200)
-frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-frame.BorderSizePixel = 1
-frame.Active = true
-frame.Draggable = true
-
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not gameProcessed and input.KeyCode == Enum.KeyCode.RightControl then
-        Frame.Visible = not Frame.Visible
+-- Инициализация
+local function Init()
+    -- Очистка старых подключений
+    for _, connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
     end
-end)
+    connections = {}
+    espCache = {}
 
+    -- Инициализация функций
+    ApplyNoRecoil()
+    UpdateESP()
 
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    -- Основные подключения
+    table.insert(connections, RunService.RenderStepped:Connect(function()
+        pcall(function()
+            if getgenv().Settings.Aimbot.Enabled and RightMouseDown then
+                aimbotTarget = GetClosestPlayer()
+                if aimbotTarget then
+                    AimAt(aimbotTarget)
+                end
+            end
+            
+            BHop()
+            UpdateThirdPerson()
+        end)
+    end))
 
-local title = Instance.new("TextLabel", frame)
-title.Size = UDim2.new(1, 0, 0, 30)
-title.Position = UDim2.new(0, 0, 0, 0)
-title.Text = "CBX Custom GUI"
-title.Font = Enum.Font.GothamBold
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.BackgroundTransparency = 1
-title.TextSize = 18
+    table.insert(connections, RunService.Heartbeat:Connect(function()
+        pcall(function()
+            if getgenv().Settings.Triggerbot.Enabled then
+                Triggerbot()
+            end
+        end)
+    end))
 
-local UIListLayout = Instance.new("UIListLayout", frame)
-UIListLayout.Padding = UDim.new(0, 8)
-UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-UIListLayout.FillDirection = Enum.FillDirection.Vertical
-UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-UIListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+    table.insert(connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if input.UserInputType == getgenv().Settings.Aimbot.Key then
+            RightMouseDown = true
+        end
+    end))
 
-local function makeToggle(name, globalVar, callback)
-	local toggle = Instance.new("TextButton", frame)
-	toggle.Size = UDim2.new(0, 220, 0, 30)
-	toggle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-	toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-	toggle.Font = Enum.Font.Gotham
-	toggle.TextSize = 14
-	toggle.Text = "[ OFF ] " .. name
-	toggle.AutoButtonColor = false
+    table.insert(connections, UserInputService.InputEnded:Connect(function(input, gameProcessed)
+        if input.UserInputType == getgenv().Settings.Aimbot.Key then
+            RightMouseDown = false
+            aimbotTarget = nil
+        end
+    end))
 
-	Instance.new("UICorner", toggle).CornerRadius = UDim.new(0, 6)
-	Instance.new("UIStroke", toggle).Thickness = 1
+    table.insert(connections, RunService.Heartbeat:Connect(function(delta)
+        local now = os.clock()
+        if now - espLastUpdate > espUpdateInterval then
+            UpdateESP()
+            espLastUpdate = now
+        end
+    end))
+    
+    table.insert(connections, Players.PlayerAdded:Connect(function(player)
+        player.CharacterAdded:Connect(function(character)
+            task.wait(1)
+            UpdateESP()
+        end)
+    end))
 
-	getgenv()[globalVar] = false
+    table.insert(connections, Players.PlayerRemoving:Connect(function(player)
+        if espCache[player] then
+            if espCache[player].Highlight then
+                pcall(function() espCache[player].Highlight:Destroy() end)
+            end
+            if espCache[player].HealthConnection then
+                pcall(function() espCache[player].HealthConnection:Disconnect() end)
+            end
+            espCache[player] = nil
+        end
+    end))
 
-	toggle.MouseButton1Click:Connect(function()
-		getgenv()[globalVar] = not getgenv()[globalVar]
-		toggle.Text = (getgenv()[globalVar] and "[ ON  ] " or "[ OFF ] ") .. name
-		if callback then
-			callback(getgenv()[globalVar])
-		end
-	end)
+    table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            camRotY = camRotY - input.Delta.X * 0.3
+            camRotX = math.clamp(camRotX - input.Delta.Y * 0.3, -80, 80)
+        end
+    end))
+    
+    table.insert(connections, LocalPlayer.CharacterAdded:Connect(function(character)
+        task.wait(2)
+        ApplyNoRecoil()
+    end))
 end
 
-makeToggle("Wallhack", "WallhackEnabled")
-makeToggle("Aimbot", "AimbotEnabled")
-makeToggle("BunnyHop", "BhopEnabled", toggleBhop)
-makeToggle("3rd Person View", "ThirdPersonEnabled", toggleThirdPerson)
-makeToggle("Triggerbot", "TriggerbotEnabled")
+-- Запуск
+CreateGUI()
+Init()
 
--- // Triggerbot Delay Slider
-local delayLabel = Instance.new("TextLabel", frame)
-delayLabel.Size = UDim2.new(0, 220, 0, 20)
-delayLabel.BackgroundTransparency = 1
-delayLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-delayLabel.Font = Enum.Font.Gotham
-delayLabel.TextSize = 14
-delayLabel.Text = "Triggerbot Delay: " .. tostring(math.floor(getgenv().TriggerbotDelay * 1000)) .. " ms"
-
-local sliderFrame = Instance.new("Frame", frame)
-sliderFrame.Size = UDim2.new(0, 220, 0, 6)
-sliderFrame.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
-sliderFrame.BorderSizePixel = 0
-Instance.new("UICorner", sliderFrame).CornerRadius = UDim.new(0, 3)
-
-local fill = Instance.new("Frame", sliderFrame)
-fill.Size = UDim2.new(getgenv().TriggerbotDelay, 0, 1, 0)
-fill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
-fill.BorderSizePixel = 0
-fill.Name = "Fill"
-Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
-fill.Parent = sliderFrame
-
-local dragging = false
-
-local function updateSlider(inputX)
-	local relativeX = math.clamp((inputX - sliderFrame.AbsolutePosition.X) / sliderFrame.AbsoluteSize.X, 0.01, 1)
-	getgenv().TriggerbotDelay = relativeX
-	fill.Size = UDim2.new(relativeX, 0, 1, 0)
-	delayLabel.Text = "Triggerbot Delay: " .. tostring(math.floor(relativeX * 1000)) .. " ms"
-end
-
-sliderFrame.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		dragging = true
-		updateSlider(input.Position.X)
-	end
-end)
-
-sliderFrame.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		dragging = false
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-		updateSlider(input.Position.X)
-	end
-end)
-
--- // Triggerbot индикатор
-indicatorText = Instance.new("TextLabel", frame)
-indicatorText.Size = UDim2.new(0, 220, 0, 20)
-indicatorText.BackgroundTransparency = 1
-indicatorText.TextColor3 = Color3.fromRGB(255, 100, 100)
-indicatorText.Font = Enum.Font.GothamBold
-indicatorText.TextSize = 14
-indicatorText.Text = ""
-
--- // Skin Changer Button
-local skinBtn = Instance.new("TextButton", frame)
-skinBtn.Size = UDim2.new(0, 220, 0, 30)
-skinBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-skinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-skinBtn.Font = Enum.Font.Gotham
-skinBtn.TextSize = 14
-skinBtn.Text = "[ ► ] Launch Skin Changer"
-skinBtn.AutoButtonColor = false
-
-Instance.new("UICorner", skinBtn).CornerRadius = UDim.new(0, 6)
-Instance.new("UIStroke", skinBtn).Thickness = 1
-
-local skinLoaded = false
-skinBtn.MouseButton1Click:Connect(function()
-	if skinLoaded then return end
-	skinLoaded = true
-
-	task.spawn(function()
-		local success, result = pcall(function()
-			local script_key = "KEY HERE"
-			local loaderUrl = "https://api.luarmor.net/files/v3/loaders/62cee44fa4b2a83752a4ea9e8eef7081.lua"
-			local loaderCode = game:HttpGet(loaderUrl)
-			loadstring(loaderCode)()
-		end)
-
-		if not success then
-			warn("[SkinChanger] Ошибка загрузки:", result)
-			skinBtn.Text = "[ × ] Load Failed"
-			skinBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
-		else
-			skinBtn.Text = "[ ✔ ] Loaded"
-			skinBtn.TextColor3 = Color3.fromRGB(80, 255, 100)
-		end
-	end)
-end)
-
--- // No Recoil Button
-local externalBtn = Instance.new("TextButton", frame)
-externalBtn.Size = UDim2.new(0, 220, 0, 30)
-externalBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-externalBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-externalBtn.Font = Enum.Font.Gotham
-externalBtn.TextSize = 14
-externalBtn.Text = "[ OFF ] No Recoil"
-externalBtn.AutoButtonColor = false
-
-Instance.new("UICorner", externalBtn).CornerRadius = UDim.new(0, 6)
-Instance.new("UIStroke", externalBtn).Thickness = 1
-
--- // No Recoil Toggle Logic
-local noRecoilEnabled = false
-local originalSpreadValues = {}
-
-externalBtn.MouseButton1Click:Connect(function()
-	noRecoilEnabled = not noRecoilEnabled
-
-	local rs = game:GetService("ReplicatedStorage")
-	local weaponsFolder = rs:FindFirstChild("Weapons")
-
-	if weaponsFolder then
-		for _, weapon in pairs(weaponsFolder:GetChildren()) do
-			local spreadFolder = weapon:FindFirstChild("Spread")
-			if spreadFolder then
-				for _, val in pairs(spreadFolder:GetChildren()) do
-					if val:IsA("NumberValue") then
-						local key = weapon.Name .. "/" .. val.Name
-						if noRecoilEnabled then
-							if originalSpreadValues[key] == nil then
-								originalSpreadValues[key] = val.Value
-							end
-							val.Value = 0
-						else
-							if originalSpreadValues[key] then
-								val.Value = originalSpreadValues[key]
-							end
-						end
-					end
-				end
-			end
-		end
-	end
-
-	if noRecoilEnabled then
-		externalBtn.Text = "[ ✔ ] No Recoil ON"
-		externalBtn.TextColor3 = Color3.fromRGB(80, 255, 100)
-	else
-		externalBtn.Text = "[ OFF ] No Recoil"
-		externalBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	end
-end)
-
+print("✅ Script loaded! Press RightControl to toggle menu")
